@@ -1,13 +1,16 @@
 import os
 
 import xbmc
+import xbmcvfs
 
 
 def write_keymap(addon_path: str, button_code: int = None):
     """
-    Schreibt keymaps/wireguard.xml.
+    Schreibt die Keymap nach special://userdata/keymaps/wireguard.xml.
+    Diese Location wird von Kodi dynamisch neu geladen (Action(reloadkeymaps)).
+    ZIP-install-safe: service.py ruft diese Funktion beim Start auf.
+
     button_code: Wenn gesetzt, wird ein <key id="..."> für die Fernbedienung eingetragen.
-    Danach lädt Kodi die Keymaps automatisch neu.
     """
     remote_block = ""
     if button_code is not None:
@@ -28,16 +31,15 @@ def write_keymap(addon_path: str, button_code: int = None):
         "</keymap>\n"
     )
 
-    keymap_path = os.path.join(addon_path, "keymaps", "wireguard.xml")
+    keymap_path = xbmcvfs.translatePath("special://userdata/keymaps/wireguard.xml")
     with open(keymap_path, "w", encoding="utf-8") as f:
         f.write(xml)
 
     xbmc.executebuiltin("Action(reloadkeymaps)")
-    xbmc.log(f"[WireGuardSwitcher] Keymap geschrieben (button_code={button_code})", xbmc.LOGINFO)
+    xbmc.log(f"[WireGuardSwitcher] Keymap geschrieben nach {keymap_path} (button_code={button_code})", xbmc.LOGINFO)
 
 
 def restore_from_state(addon_path: str, state: dict):
-    """Stellt die Keymap aus dem gespeicherten State wieder her (nach Deploy)."""
+    """Stellt die Keymap aus dem gespeicherten State wieder her (nach Deploy / Kodi-Start)."""
     button_code = state.get("button_code")
-    if button_code is not None:
-        write_keymap(addon_path, button_code=int(button_code))
+    write_keymap(addon_path, button_code=int(button_code) if button_code is not None else None)

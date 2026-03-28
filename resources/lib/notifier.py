@@ -31,7 +31,7 @@ def _notify(message, icon, duration):
 
 def connecting(server_name: str):
     _log_msg("info", f"Connecting to {server_name}...")
-    _notify(f"Connecting: {server_name}", xbmcgui.NOTIFICATION_INFO if _IN_KODI else "", 3000)
+    _notify(f"Connecting: {server_name}", xbmcgui.NOTIFICATION_INFO if _IN_KODI else "", 5000)
 
 
 def connected(server_name: str):
@@ -52,3 +52,14 @@ def error(detail: str):
 def reconnecting(server_name: str):
     _log_msg("warning", f"Tunnel down, reconnecting to {server_name}...")
     _notify(f"Reconnecting: {server_name}", xbmcgui.NOTIFICATION_WARNING if _IN_KODI else "", 3000)
+
+
+def kill_switch_blocking():
+    _log_msg("error", "Kill Switch aktiv — kein Internet, VPN getrennt")
+    # Dauer 35000ms: überbrückt den 30s-Reconnect-Zyklus, bleibt also dauerhaft sichtbar
+    # bis der Tunnel wieder steht und eine "Connected"-Meldung sie ablöst
+    _notify(
+        "Kein Internet — VPN getrennt (Kill Switch)",
+        xbmcgui.NOTIFICATION_ERROR if _IN_KODI else "",
+        35000,
+    )
