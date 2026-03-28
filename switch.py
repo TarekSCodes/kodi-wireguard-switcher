@@ -27,6 +27,20 @@ def learn_button(addon_path: str):
 
     notifier._log_msg("info", f"Button-Code gelernt: {code}")
 
+    # Prüfen ob eine andere Keymap-Datei denselben Key bereits belegt
+    conflict = keymap_manager.find_key_conflict(code)
+    if conflict:
+        yes = xbmcgui.Dialog().yesno(
+            "WireGuard Switcher",
+            f"Diese Taste wird bereits von '{conflict}' verwendet.\n"
+            "Soll der Eintrag dort entfernt werden?\n\n"
+            "(Nein = Abbrechen)"
+        )
+        if not yes:
+            notifier._log_msg("info", f"Button-Lernen abgebrochen wegen Konflikt mit {conflict}")
+            return
+        keymap_manager.remove_key_from_file(conflict, code)
+
     manager = WireGuardManager(addon_path)
     manager.set_button_code(code)
     keymap_manager.write_keymap(addon_path, button_code=code)
@@ -40,6 +54,8 @@ def learn_button(addon_path: str):
 def show_status(addon_path: str):
     from resources.lib import kill_switch as ks
     manager = WireGuardManager(addon_path)
+    manager._sync_kill_switch()  # iptables sofort mit Setting synchronisieren
+
     server = manager.get_state().get("current_server") or "—"
     tunnel_up = manager.is_tunnel_up()
     ks_active = ks.is_enabled()

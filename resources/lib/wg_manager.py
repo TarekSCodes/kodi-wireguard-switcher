@@ -279,11 +279,14 @@ class WireGuardManager:
                 self._run([IP_BIN, "link", "del", iface])
                 return False, f"wg setconf: {err[:60]}"
 
-            # 3. IP-Adresse setzen
-            if address:
-                rc, _, err = self._run([IP_BIN, "addr", "add", address, "dev", iface])
+            # 3. IP-Adresse(n) setzen (kann komma-separiert sein: "10.x/32, fd00::x/128")
+            for addr in address.split(","):
+                addr = addr.strip()
+                if not addr:
+                    continue
+                rc, _, err = self._run([IP_BIN, "addr", "add", addr, "dev", iface])
                 if rc != 0 and "exists" not in err.lower():
-                    notifier._log_msg("warning", f"ip addr add: {err[:40]}")
+                    notifier._log_msg("warning", f"ip addr add {addr}: {err[:60]}")
 
             # 4. MTU setzen und Interface hochbringen
             self._run([IP_BIN, "link", "set", "mtu", mtu, "up", "dev", iface])
@@ -438,9 +441,28 @@ class WireGuardManager:
             return False
         return self._verify_tunnel(self._config_name(conf_path))
 
+    def _sync_kill_switch(self):
+        """
+        Synchronisiert iptables-Regeln mit dem aktuellen Kill-Switch-Setting.
+        - Setting=True, iptables=aus, Tunnel oben  → aktivieren
+        - Setting=False, iptables=an               → sofort deaktivieren
+        """
+        ks_setting = self._kill_switch_enabled()
+        ks_active = kill_switch.is_enabled()
+
+        if ks_setting and not ks_active and self.is_tunnel_up():
+            iface = self._config_name(self._current_config_path())
+            endpoint_ip = self._state.get("_endpoint_ip", "")
+            kill_switch.enable(iface, endpoint_ip)
+            notifier._log_msg("info", "Kill Switch sync: aktiviert (Setting=an, Tunnel oben)")
+        elif not ks_setting and ks_active:
+            kill_switch.disable()
+            notifier._log_msg("info", "Kill Switch sync: deaktiviert (Setting=aus)")
+
     def auto_reconnect(self):
         if not self._configs:
             return
+        self._load_state()  # State nachladen — switch.py kann Index geändert haben
         if not self.is_tunnel_up():
             conf_path = self._current_config_path()
             server_name = self._config_name(conf_path)
@@ -449,8 +471,7 @@ class WireGuardManager:
             ok, err = self._wg_up(conf_path)
             if not ok:
                 if self._kill_switch_enabled():
-                    # Kill Switch aktiv + Reconnect fehlgeschlagen → Internet blockiert.
-                    # Persistente Notification (35s) damit User es sieht und versteht.
                     notifier.kill_switch_blocking()
                 else:
                     notifier.error(f"Reconnect failed — {server_name}: {err}")
+        self._sync_kill_switch()
