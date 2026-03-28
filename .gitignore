@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+state.json
+configs/*.conf
+deploy.py
+sharded-marinating-coral.md

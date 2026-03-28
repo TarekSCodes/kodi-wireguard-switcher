@@ -1,0 +1,13 @@
+<keymap>
+  <global>
+    <keyboard>
+      <w>RunScript(service.wireguard.switcher)</w>
+    </keyboard>
+    <remote>
+      <!-- Gewuenschten Button einkommentieren oder eigenen hinzufuegen: -->
+      <!-- <title>RunScript(service.wireguard.switcher)</title> -->
+      <!-- <subtitle>RunScript(service.wireguard.switcher)</subtitle> -->
+      <!-- <info>RunScript(service.wireguard.switcher)</info> -->
+    </remote>
+  </global>
+</keymap>

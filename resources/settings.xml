@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<settings>
+    <setting type="lsep" label="WireGuard VPN" />
+    <setting id="map_button"
+              type="action"
+              label="Remote-Taste belegen (VPN-Wechsel)"
+              action="RunScript(service.wireguard.switcher,learn)" />
+</settings>
