@@ -281,6 +281,10 @@ class WireGuardManager:
             endpoint_ip = self._resolve_endpoint_ip(endpoint)
             if endpoint_ip:
                 self._state["_endpoint_ip"] = endpoint_ip
+        # Fallback: gecachte IP nutzen wenn DNS fehlschlägt
+        # (Kill Switch blockiert DNS-Queries zum Router während Reconnect)
+        if not endpoint_ip:
+            endpoint_ip = self._state.get("_endpoint_ip")
 
         # Stripped Config für wg setconf schreiben
         stripped = self._write_stripped_conf(conf)
@@ -650,6 +654,10 @@ class WireGuardManager:
 
                 # Kill Switch erhalten wenn möglich — kein IP-Leck bei Reconnect
                 self._wg_down(conf_path, disable_kill_switch=not ks_was_active)
+                # Endpoint-IP als Fallback wiederherstellen — _wg_down() entfernt sie
+                # aus State, aber _wg_up() braucht sie wenn Kill Switch DNS blockiert
+                if old_endpoint:
+                    self._state["_endpoint_ip"] = old_endpoint
                 ok, err = self._wg_up(conf_path)
 
                 if ok and self._verify_tunnel(server_name):
