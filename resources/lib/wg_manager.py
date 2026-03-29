@@ -275,16 +275,26 @@ class WireGuardManager:
         # Aktuellen Default-Gateway ermitteln (für Endpoint-Route)
         gw_ip, _ = self._get_default_gateway()
 
+        # Endpoint-Port aus Config lesen (z.B. HideMe nutzt Port 428, nicht 51820)
+        endpoint_port = 51820
+        if endpoint:
+            try:
+                endpoint_port = int(endpoint.rpartition(":")[2])
+            except (ValueError, IndexError):
+                pass
+
         # Endpoint-IP auflösen (verhindert Routing-Loop durch den eigenen Tunnel)
         endpoint_ip = None
         if endpoint and gw_ip:
             endpoint_ip = self._resolve_endpoint_ip(endpoint)
             if endpoint_ip:
                 self._state["_endpoint_ip"] = endpoint_ip
-        # Fallback: gecachte IP nutzen wenn DNS fehlschlägt
+                self._state["_endpoint_port"] = endpoint_port
+        # Fallback: gecachte IP/Port nutzen wenn DNS fehlschlägt
         # (Kill Switch blockiert DNS-Queries zum Router während Reconnect)
         if not endpoint_ip:
             endpoint_ip = self._state.get("_endpoint_ip")
+            endpoint_port = self._state.get("_endpoint_port", endpoint_port)
 
         # Stripped Config für wg setconf schreiben
         stripped = self._write_stripped_conf(conf)
@@ -340,7 +350,7 @@ class WireGuardManager:
 
             # 9. Kill Switch aktivieren
             if self._kill_switch_enabled():
-                kill_switch.enable(iface, endpoint_ip or "")
+                kill_switch.enable(iface, endpoint_ip or "", endpoint_port)
 
         finally:
             try:
@@ -630,7 +640,8 @@ class WireGuardManager:
         if ks_setting and not ks_active and self.is_tunnel_up():
             iface = self._config_name(self._current_config_path())
             endpoint_ip = self._state.get("_endpoint_ip", "")
-            kill_switch.enable(iface, endpoint_ip)
+            endpoint_port = self._state.get("_endpoint_port", 51820)
+            kill_switch.enable(iface, endpoint_ip, endpoint_port)
             notifier._log_msg("info", "Kill Switch sync: aktiviert (Setting=an, Tunnel oben)")
         elif not ks_setting and ks_active:
             kill_switch.disable()
@@ -649,18 +660,39 @@ class WireGuardManager:
                 conf_path = self._current_config_path()
                 server_name = self._config_name(conf_path)
                 ks_was_active = kill_switch.is_enabled()
-                old_endpoint = self._state.get("_endpoint_ip", "")  # VOR _wg_down sichern!
+                old_endpoint = self._state.get("_endpoint_ip", "")       # VOR _wg_down sichern!
+                old_endpoint_port = self._state.get("_endpoint_port", 51820)
                 notifier.reconnecting(server_name)
 
                 # Kill Switch erhalten wenn möglich — kein IP-Leck bei Reconnect
                 self._wg_down(conf_path, disable_kill_switch=not ks_was_active)
-                # Endpoint-IP als Fallback wiederherstellen — _wg_down() entfernt sie
+                # Endpoint-IP/Port als Fallback wiederherstellen — _wg_down() entfernt sie
                 # aus State, aber _wg_up() braucht sie wenn Kill Switch DNS blockiert
                 if old_endpoint:
                     self._state["_endpoint_ip"] = old_endpoint
+                    self._state["_endpoint_port"] = old_endpoint_port
                 ok, err = self._wg_up(conf_path)
 
+                # Erfolg nur wenn Interface up UND Handshake stattgefunden hat.
+                # ts=0 → WireGuard hat keine Session → als Fehler zählen damit
+                # Auto-Cycle nach 3 Fehlern greift (statt endlosem Reconnect-Loop).
+                tunnel_ok = False
                 if ok and self._verify_tunnel(server_name):
+                    rc, out, _ = self._run([WG_BIN, "show", server_name, "latest-handshakes"])
+                    if rc != 0:
+                        tunnel_ok = True  # wg nicht verfügbar → optimistisch
+                    else:
+                        for line in out.strip().splitlines():
+                            parts = line.strip().split()
+                            if len(parts) >= 2:
+                                try:
+                                    if int(parts[-1]) > 0:
+                                        tunnel_ok = True
+                                    break
+                                except ValueError:
+                                    pass
+
+                if tunnel_ok:
                     self._reconnect_failures = 0
                     notifier.connected(server_name)
                 else:
@@ -684,10 +716,12 @@ class WireGuardManager:
                         # Neuen Tunnel aufbauen (Kill Switch noch aktiv mit alten Regeln)
                         ok2, _ = self._wg_up(next_conf)
                         new_endpoint = self._state.get("_endpoint_ip", "")
+                        new_endpoint_port = self._state.get("_endpoint_port", 51820)
                         if ok2 and ks_was_active:
                             # Atomarer Regelaustausch: old_iface→new_iface, kein Leck
                             kill_switch.swap_server(next_server, new_endpoint,
-                                                    server_name, old_endpoint)
+                                                    server_name, old_endpoint,
+                                                    new_endpoint_port, old_endpoint_port)
                         elif not ok2:
                             notifier.error(f"Auto-Cycle fehlgeschlagen: {next_server}")
                     elif self._kill_switch_enabled():

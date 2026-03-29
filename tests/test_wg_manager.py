@@ -133,6 +133,75 @@ class TestAutoReconnectStateSync:
             mock_up.assert_not_called()
 
 
+class TestEndpointPortInWgUp:
+    """Stellt sicher dass der Endpoint-Port aus der Config an Kill Switch weitergegeben wird."""
+
+    def test_custom_port_passed_to_kill_switch_enable(self, tmp_addon):
+        """HideMe-Style Config mit Port 428 → Kill Switch bekommt 428."""
+        conf = tmp_addon / "configs" / "HideMe-Test.conf"
+        conf.write_text(
+            "[Interface]\n"
+            "PrivateKey = AAAA\n"
+            "Address = 10.0.0.2/32\n"
+            "[Peer]\n"
+            "PublicKey = BBBB\n"
+            "Endpoint = vpn.example.com:428\n"
+            "AllowedIPs = 0.0.0.0/0\n"
+        )
+        xbmcaddon.Addon.return_value.getSetting.return_value = "true"  # Kill Switch an
+        mgr = WireGuardManager(str(tmp_addon))
+
+        enable_calls = []
+
+        with patch.object(mgr, "_run", return_value=(0, "", "")), \
+             patch("resources.lib.wg_manager.kill_switch") as mock_ks, \
+             patch.object(mgr, "_write_stripped_conf", return_value="/tmp/fake.conf"), \
+             patch("os.unlink"), \
+             patch.object(mgr, "_get_default_gateway", return_value=("10.0.0.1", "eth0")), \
+             patch.object(mgr, "_resolve_endpoint_ip", return_value="1.2.3.4"), \
+             patch.object(mgr, "_wait_for_handshake", return_value=True), \
+             patch("resources.lib.wg_manager.notifier"):
+            mock_ks.is_enabled.return_value = False
+            mock_ks.enable.side_effect = lambda *a, **kw: enable_calls.append(a)
+            mgr._wg_up(str(conf))
+
+        assert len(enable_calls) == 1
+        _, _, port = enable_calls[0]
+        assert port == 428, f"Port 428 erwartet, got: {port}"
+
+    def test_default_port_51820_when_missing(self, tmp_addon):
+        """Config ohne Port-Suffix → Fallback 51820."""
+        conf = tmp_addon / "configs" / "Server-NoPort.conf"
+        conf.write_text(
+            "[Interface]\n"
+            "PrivateKey = AAAA\n"
+            "Address = 10.0.0.2/32\n"
+            "[Peer]\n"
+            "PublicKey = BBBB\n"
+            "Endpoint = 1.2.3.4:51820\n"
+            "AllowedIPs = 0.0.0.0/0\n"
+        )
+        xbmcaddon.Addon.return_value.getSetting.return_value = "true"
+        mgr = WireGuardManager(str(tmp_addon))
+
+        enable_calls = []
+
+        with patch.object(mgr, "_run", return_value=(0, "", "")), \
+             patch("resources.lib.wg_manager.kill_switch") as mock_ks, \
+             patch.object(mgr, "_write_stripped_conf", return_value="/tmp/fake.conf"), \
+             patch("os.unlink"), \
+             patch.object(mgr, "_get_default_gateway", return_value=("10.0.0.1", "eth0")), \
+             patch.object(mgr, "_resolve_endpoint_ip", return_value="1.2.3.4"), \
+             patch.object(mgr, "_wait_for_handshake", return_value=True), \
+             patch("resources.lib.wg_manager.notifier"):
+            mock_ks.is_enabled.return_value = False
+            mock_ks.enable.side_effect = lambda *a, **kw: enable_calls.append(a)
+            mgr._wg_up(str(conf))
+
+        _, _, port = enable_calls[0]
+        assert port == 51820
+
+
 class TestAddrSplitInWgUp:
     """Stellt sicher dass komma-separierte Adressen einzeln übergeben werden."""
 
@@ -450,6 +519,30 @@ class TestAutoReconnectNoLeak:
             mgr.auto_reconnect()
 
         assert len(disabled_calls) == 0, "Kill Switch darf beim Reconnect nicht deaktiviert werden"
+
+    def test_failure_counted_when_handshake_times_out(self, tmp_addon):
+        """Interface existiert aber ts=0 → kein echter Handshake → Fehler zählen."""
+        xbmcaddon.Addon.return_value.getSetting.return_value = "false"
+        mgr = WireGuardManager(str(tmp_addon))
+
+        def fake_run(cmd):
+            if "latest-handshakes" in cmd:
+                return 0, "PUBKEY\t0\n", ""  # kein Handshake
+            return 0, "", ""
+
+        with patch.object(mgr, "_load_state"), \
+             patch.object(mgr, "is_tunnel_up", return_value=False), \
+             patch.object(mgr, "_verify_tunnel", return_value=True), \
+             patch.object(mgr, "_wg_up", return_value=(True, "")), \
+             patch.object(mgr, "_wg_down", return_value=(True, "")), \
+             patch.object(mgr, "_run", side_effect=fake_run), \
+             patch.object(mgr, "_sync_kill_switch"), \
+             patch("resources.lib.wg_manager.kill_switch") as mock_ks, \
+             patch("resources.lib.wg_manager.notifier"):
+            mock_ks.is_enabled.return_value = False
+            mgr.auto_reconnect()
+
+        assert mgr._reconnect_failures == 1
 
     def test_kill_switch_disabled_when_not_active(self, tmp_addon):
         """Kill Switch war aus → _wg_down darf ihn ausschalten (default behavior)."""
