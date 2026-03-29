@@ -72,6 +72,71 @@ class TestEnable:
                     assert result is False
 
 
+class TestSwapServer:
+    def test_does_nothing_when_not_enabled(self):
+        with patch("resources.lib.kill_switch.is_enabled", return_value=False):
+            with patch("resources.lib.kill_switch._run") as mock_run:
+                ks.swap_server("wg1", "2.2.2.2", "wg0", "1.1.1.1")
+                mock_run.assert_not_called()
+
+    def test_inserts_new_endpoint_before_removing_old(self):
+        """Schritt 1 muss vor Schritt 2 erfolgen — kein Moment ohne Endpoint-Ausnahme."""
+        call_order = []
+
+        def fake_run(args):
+            if args[0] == "-I" and "2.2.2.2" in args:
+                call_order.append("insert_new_endpoint")
+            elif args[0] == "-D" and "wg0" in args:
+                call_order.append("delete_old_iface")
+            elif args[0] == "-D" and "1.1.1.1" in args:
+                call_order.append("delete_old_endpoint")
+            elif args[0] == "-I" and "wg1" in args:
+                call_order.append("insert_new_iface")
+            elif args[0] == "-D" and "2.2.2.2" in args:
+                call_order.append("delete_temp_endpoint")
+            return 0, ""
+
+        with patch("resources.lib.kill_switch.is_enabled", return_value=True):
+            with patch("resources.lib.kill_switch._run", side_effect=fake_run):
+                ks.swap_server("wg1", "2.2.2.2", "wg0", "1.1.1.1")
+
+        assert call_order[0] == "insert_new_endpoint", "Neue Endpoint-Ausnahme muss zuerst kommen"
+        assert call_order[-1] == "delete_temp_endpoint", "Temp-Ausnahme muss zuletzt entfernt werden"
+
+    def test_skips_old_endpoint_delete_when_empty(self):
+        """Wenn kein alter Endpoint bekannt: kein -D für leeren Endpoint."""
+        deleted = []
+
+        def fake_run(args):
+            if args[0] == "-D":
+                deleted.append(args)
+            return 0, ""
+
+        with patch("resources.lib.kill_switch.is_enabled", return_value=True):
+            with patch("resources.lib.kill_switch._run", side_effect=fake_run):
+                ks.swap_server("wg1", "2.2.2.2", "wg0", "")
+
+        for d in deleted:
+            assert "" not in d, "Kein Löschen von leerem Endpoint"
+
+    def test_new_iface_rules_inserted_at_correct_positions(self):
+        """Neue Interface-Regeln an Position 3 und 4 einfügen."""
+        inserts = []
+
+        def fake_run(args):
+            if args[0] == "-I" and "wg1" in args:
+                inserts.append((args[1], args[2]))  # (chain, position)
+            return 0, ""
+
+        with patch("resources.lib.kill_switch.is_enabled", return_value=True):
+            with patch("resources.lib.kill_switch._run", side_effect=fake_run):
+                ks.swap_server("wg1", "2.2.2.2", "wg0", "1.1.1.1")
+
+        positions = {pos for _, pos in inserts}
+        assert "3" in positions
+        assert "4" in positions
+
+
 class TestDisable:
     def test_removes_output_and_forward_hooks(self):
         deleted_hooks = []

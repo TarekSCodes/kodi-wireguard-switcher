@@ -94,3 +94,43 @@ def disable():
     _run(["-F", CHAIN])
     _run(["-X", CHAIN])
     notifier._log_msg("info", "Kill Switch deaktiviert")
+
+
+def swap_server(new_iface: str, new_endpoint: str, old_iface: str, old_endpoint: str):
+    """
+    Tauscht Kill-Switch-Regeln leckfrei beim Server-Wechsel.
+    Kein Moment in dem beliebiger Traffic ungefiltert fließen kann.
+
+    Ablauf:
+    1. Neue Endpoint-UDP-Ausnahme einfügen → Handshake zum neuen Server kann beginnen
+    2. Alte Interface- und Endpoint-Regeln entfernen
+    3. Neue Interface-Regeln einfügen
+    4. Temp Endpoint-Ausnahme entfernen (durch Interface-Regel abgedeckt)
+
+    Chain-Zustand während des Tauschs:
+    Vor:        loopback, old_iface, old_endpoint UDP, ESTABLISHED, REJECT
+    Nach Schritt 1: + new_endpoint UDP
+    Nach Schritt 2: − old_iface, − old_endpoint → loopback + new_endpoint UDP + ESTABLISHED
+    Nach Schritt 3: + new_iface
+    Nach Schritt 4: loopback, new_iface, ESTABLISHED, REJECT (Endzustand)
+    """
+    if not is_enabled():
+        return
+
+    # 1. Neue Endpoint-Ausnahme VOR ESTABLISHED+REJECT einfügen (Position 5)
+    _run(["-I", CHAIN, "5", "-d", new_endpoint, "-p", "udp", "--dport", "51820", "-j", "RETURN"])
+
+    # 2. Alte Regeln entfernen (nach Spec, nicht nach Position)
+    _run(["-D", CHAIN, "-o", old_iface, "-j", "RETURN"])
+    _run(["-D", CHAIN, "-i", old_iface, "-j", "RETURN"])
+    if old_endpoint:
+        _run(["-D", CHAIN, "-d", old_endpoint, "-p", "udp", "--dport", "51820", "-j", "RETURN"])
+
+    # 3. Neue Interface-Regeln einfügen (nach lo-Regeln, Positionen 3+4)
+    _run(["-I", CHAIN, "3", "-o", new_iface, "-j", "RETURN"])
+    _run(["-I", CHAIN, "4", "-i", new_iface, "-j", "RETURN"])
+
+    # 4. Temp Endpoint-Ausnahme entfernen (Interface-Regel deckt Traffic jetzt ab)
+    _run(["-D", CHAIN, "-d", new_endpoint, "-p", "udp", "--dport", "51820", "-j", "RETURN"])
+
+    notifier._log_msg("info", f"Kill Switch: Tausch {old_iface}→{new_iface} (leckfrei)")

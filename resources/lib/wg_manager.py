@@ -1,3 +1,8 @@
+try:
+    import fcntl as _fcntl
+    _HAVE_FCNTL = True
+except ImportError:
+    _HAVE_FCNTL = False  # Windows — kein Locking (LibreELEC/Linux ist Zielplattform)
 import glob
 import json
 import os
@@ -5,6 +10,7 @@ import re
 import socket
 import subprocess
 import tempfile
+import time
 
 import xbmcaddon
 
@@ -32,6 +38,7 @@ class WireGuardManager:
         self._state_file = os.path.join(addon_path, "state.json")
         self._configs = []
         self._state = {}
+        self._reconnect_failures = 0
         self._load_configs()
         self._load_state()
 
@@ -122,8 +129,18 @@ class WireGuardManager:
         self._state["index"] = idx
         self._state["current_server"] = server
         try:
-            with open(self._state_file, "w") as f:
-                json.dump(self._state, f, indent=2)
+            dir_ = os.path.dirname(self._state_file)
+            fd, tmp_path = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(self._state, f, indent=2)
+                os.replace(tmp_path, self._state_file)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except OSError as e:
             notifier._log_msg("error", f"Could not write state.json: {e}")
 
@@ -313,7 +330,12 @@ class WireGuardManager:
                 self._save_dns()
                 self._write_dns(dns)
 
-            # 8. Kill Switch aktivieren (nach erfolgreichem Tunnel-Aufbau)
+            # 8. Auf WireGuard-Handshake warten — sicherstellt dass der Tunnel
+            #    tatsächlich Traffic leitet bevor Kill Switch alle anderen Pfade sperrt
+            if self._kill_switch_enabled():
+                self._wait_for_handshake(iface)
+
+            # 9. Kill Switch aktivieren
             if self._kill_switch_enabled():
                 kill_switch.enable(iface, endpoint_ip or "")
 
@@ -325,16 +347,18 @@ class WireGuardManager:
 
         return True, ""
 
-    def _wg_down(self, conf_path: str) -> tuple:
+    def _wg_down(self, conf_path: str, disable_kill_switch: bool = True) -> tuple:
         """
         Trennt einen WireGuard-Tunnel.
         Entspricht funktional: wg-quick down <conf>
+        disable_kill_switch=False: Kill Switch bleibt aktiv (für leckfreien Reconnect).
         """
         iface = self._config_name(conf_path)
 
-        # Kill Switch IMMER deaktivieren — auch wenn Interface schon down ist.
-        # Verhindert stale iptables-Regeln die den Pi sperren.
-        kill_switch.disable()
+        # Kill Switch deaktivieren (Default) — verhindert stale iptables-Regeln.
+        # Bei disable_kill_switch=False bleibt er aktiv (Reconnect zum gleichen Server).
+        if disable_kill_switch:
+            kill_switch.disable()
 
         # Prüfen ob Interface überhaupt existiert
         rc, out, _ = self._run([WG_BIN, "show", "interfaces"])
@@ -412,34 +436,171 @@ class WireGuardManager:
         if not self._check_requirements():
             return
 
-        current_conf = self._current_config_path()
-        current_server = self._config_name(current_conf) if current_conf else ""
-        self._bring_down_if_up(current_conf)
-        if current_server:
-            notifier.disconnected(current_server)
-
-        current_idx = self._state.get("index", 0)
-        next_idx = (current_idx + 1) % len(self._configs)
-        self._state["index"] = next_idx
-        self._save_state()
-
-        new_conf = self._current_config_path()
-        new_server = self._config_name(new_conf)
-        notifier.connecting(new_server)
-        ok, err = self._wg_up(new_conf)
-        if not ok:
-            notifier.error(f"{new_server}: {err}")
+        acquired, lock_file = self._acquire_switch_lock()
+        if not acquired:
+            notifier._log_msg("warning", "cycle_next: Switch bereits im Gange — ignoriert")
+            notifier.switch_in_progress()
             return
-        if self._verify_tunnel(new_server):
-            notifier.connected(new_server)
-        else:
-            notifier.error(f"{new_server}: tunnel not visible after up")
+        try:
+            current_conf = self._current_config_path()
+            current_server = self._config_name(current_conf) if current_conf else ""
+            self._bring_down_if_up(current_conf)
+            if current_server:
+                notifier.disconnected(current_server)
+
+            current_idx = self._state.get("index", 0)
+            next_idx = (current_idx + 1) % len(self._configs)
+            self._state["index"] = next_idx
+            self._save_state()
+
+            new_conf = self._current_config_path()
+            new_server = self._config_name(new_conf)
+            notifier.connecting(new_server)
+            ok, err = self._wg_up(new_conf)
+            if not ok:
+                notifier.error(f"{new_server}: {err}")
+                return
+            if self._verify_tunnel(new_server):
+                notifier.connected(new_server)
+            else:
+                notifier.error(f"{new_server}: tunnel not visible after up")
+        finally:
+            self._release_switch_lock(lock_file)
 
     def is_tunnel_up(self) -> bool:
+        """
+        Prüft ob der WireGuard-Tunnel aktiv und funktionsfähig ist.
+        Kriterien: Interface muss existieren UND Handshake wurde erfolgreich abgeschlossen.
+        Bei altem Handshake (idle Tunnel > 3 min ohne Traffic): Probe senden und warten
+        ob WireGuard einen neuen Handshake initiiert — unterscheidet idle von server-down.
+        """
         conf_path = self._current_config_path()
         if not conf_path:
             return False
-        return self._verify_tunnel(self._config_name(conf_path))
+        iface = self._config_name(conf_path)
+
+        # 1. Interface muss existieren
+        rc, out, _ = self._run([WG_BIN, "show", "interfaces"])
+        if rc != 0:
+            return True  # wg nicht verfügbar → optimistisch
+        if iface not in out.strip().split():
+            return False
+
+        # 2. Handshake-Timestamp prüfen
+        rc, out, _ = self._run([WG_BIN, "show", iface, "latest-handshakes"])
+        if rc != 0:
+            return True  # Fallback optimistisch
+
+        ts = 0
+        for line in out.strip().splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                try:
+                    ts = int(parts[-1])
+                    break
+                except ValueError:
+                    pass
+
+        if ts == 0:
+            return False  # Noch kein Handshake abgeschlossen
+
+        if (time.time() - ts) < 180:
+            return True  # Frischer Handshake → Tunnel definitiv aktiv
+
+        # Handshake > 3 min alt: könnte idle sein (kein Traffic → kein Rekey)
+        # oder Server ist ausgefallen. Probe senden und kurz warten.
+        return self._probe_handshake(iface, ts)
+
+    def _probe_handshake(self, iface: str, old_ts: int) -> bool:
+        """
+        Sendet ein UDP-Paket um WireGuard-Handshake zu triggern.
+        Gibt True zurück wenn der Handshake-Timestamp sich innerhalb von 3s aktualisiert
+        (Tunnel war nur idle), False wenn kein Update erfolgt (Server wahrscheinlich down).
+        """
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(0.1)
+            sock.connect(("8.8.8.8", 53))
+            sock.send(b"\x00")
+            sock.close()
+        except Exception:
+            pass
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            time.sleep(0.3)
+            rc, out, _ = self._run([WG_BIN, "show", iface, "latest-handshakes"])
+            if rc == 0:
+                for line in out.strip().splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        try:
+                            if int(parts[-1]) > old_ts:
+                                return True  # Handshake erneuert → Server erreichbar
+                        except ValueError:
+                            pass
+
+        notifier._log_msg("warning", f"is_tunnel_up: kein Handshake-Update nach Probe ({iface})")
+        return False
+
+    def _wait_for_handshake(self, iface: str, timeout: float = 8.0) -> bool:
+        """
+        Wartet bis WireGuard mindestens einen Handshake abgeschlossen hat.
+        Sendet zuerst ein UDP-Paket um den Handshake zu triggern, dann polt
+        'wg show <iface> latest-handshakes' bis ein Timestamp > 0 erscheint.
+        Gibt True zurück wenn Handshake erfolgt, False bei Timeout.
+        """
+        # UDP-Paket senden — wird via 0.0.0.0/1-Route durch WireGuard geroutet
+        # und triggert die Handshake-Initiation im WireGuard-Kernel-Modul
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(0.1)
+            sock.connect(("8.8.8.8", 53))
+            sock.send(b"\x00")
+            sock.close()
+        except Exception:
+            pass
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            rc, out, _ = self._run([WG_BIN, "show", iface, "latest-handshakes"])
+            if rc == 0:
+                for line in out.strip().splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        try:
+                            ts = int(parts[-1])
+                            if ts > 0:
+                                notifier._log_msg("info", f"WireGuard Handshake abgeschlossen ({iface})")
+                                return True
+                        except ValueError:
+                            pass
+            time.sleep(0.3)
+
+        notifier._log_msg("warning", f"WireGuard Handshake Timeout nach {timeout}s ({iface}) — fortfahren")
+        return False
+
+    def _acquire_switch_lock(self):
+        """Non-blocking exclusive lock. Gibt (True, file) oder (False, None) zurück.
+        Auf Nicht-Linux-Plattformen (kein fcntl): immer erfolgreich (no-op)."""
+        if not _HAVE_FCNTL:
+            return True, None
+        lock_path = os.path.join(os.path.dirname(self._state_file), "switch.lock")
+        lf = open(lock_path, "w")
+        try:
+            _fcntl.flock(lf.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            return True, lf
+        except (IOError, OSError):
+            lf.close()
+            return False, None
+
+    def _release_switch_lock(self, lock_file):
+        if lock_file and _HAVE_FCNTL:
+            try:
+                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+                lock_file.close()
+            except Exception:
+                pass
 
     def _sync_kill_switch(self):
         """
@@ -462,16 +623,57 @@ class WireGuardManager:
     def auto_reconnect(self):
         if not self._configs:
             return
-        self._load_state()  # State nachladen — switch.py kann Index geändert haben
-        if not self.is_tunnel_up():
-            conf_path = self._current_config_path()
-            server_name = self._config_name(conf_path)
-            notifier.reconnecting(server_name)
-            self._bring_down_if_up(conf_path)
-            ok, err = self._wg_up(conf_path)
-            if not ok:
-                if self._kill_switch_enabled():
-                    notifier.kill_switch_blocking()
+        acquired, lock_file = self._acquire_switch_lock()
+        if not acquired:
+            notifier._log_msg("info", "auto_reconnect: Switch im Gange — übersprungen")
+            return
+        try:
+            self._load_state()  # State nachladen — switch.py kann Index geändert haben
+            if not self.is_tunnel_up():
+                conf_path = self._current_config_path()
+                server_name = self._config_name(conf_path)
+                ks_was_active = kill_switch.is_enabled()
+                old_endpoint = self._state.get("_endpoint_ip", "")  # VOR _wg_down sichern!
+                notifier.reconnecting(server_name)
+
+                # Kill Switch erhalten wenn möglich — kein IP-Leck bei Reconnect
+                self._wg_down(conf_path, disable_kill_switch=not ks_was_active)
+                ok, err = self._wg_up(conf_path)
+
+                if ok and self._verify_tunnel(server_name):
+                    self._reconnect_failures = 0
+                    notifier.connected(server_name)
                 else:
-                    notifier.error(f"Reconnect failed — {server_name}: {err}")
-        self._sync_kill_switch()
+                    self._reconnect_failures += 1
+                    notifier._log_msg("warning",
+                        f"Reconnect fehlgeschlagen ({server_name}), Versuch {self._reconnect_failures}")
+
+                    if self._reconnect_failures >= 3 and len(self._configs) > 1:
+                        # Server dauerhaft ausgefallen → zum nächsten wechseln
+                        current_idx = self._state.get("index", 0)
+                        next_idx = (current_idx + 1) % len(self._configs)
+                        next_conf = self._configs[next_idx]
+                        next_server = self._config_name(next_conf)
+                        notifier._log_msg("warning",
+                            f"Server {server_name} dauerhaft ausgefallen — wechsle zu {next_server}")
+
+                        self._state["index"] = next_idx
+                        self._save_state()
+                        self._reconnect_failures = 0
+
+                        # Neuen Tunnel aufbauen (Kill Switch noch aktiv mit alten Regeln)
+                        ok2, _ = self._wg_up(next_conf)
+                        new_endpoint = self._state.get("_endpoint_ip", "")
+                        if ok2 and ks_was_active:
+                            # Atomarer Regelaustausch: old_iface→new_iface, kein Leck
+                            kill_switch.swap_server(next_server, new_endpoint,
+                                                    server_name, old_endpoint)
+                        elif not ok2:
+                            notifier.error(f"Auto-Cycle fehlgeschlagen: {next_server}")
+                    elif self._kill_switch_enabled():
+                        notifier.kill_switch_blocking()
+                    else:
+                        notifier.error(f"Reconnect failed — {server_name}: {err}")
+            self._sync_kill_switch()
+        finally:
+            self._release_switch_lock(lock_file)

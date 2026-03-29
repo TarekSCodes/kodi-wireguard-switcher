@@ -1,7 +1,10 @@
 """Tests für resources/lib/wg_manager.py — nur pure Python-Logik"""
 import json
 import os
+import sys
 import tempfile
+import threading
+import time
 from unittest.mock import MagicMock, patch, call
 
 import pytest
@@ -159,8 +162,388 @@ class TestAddrSplitInWgUp:
              patch.object(mgr, "_write_stripped_conf", return_value="/tmp/fake.conf"), \
              patch("os.unlink"), \
              patch.object(mgr, "_get_default_gateway", return_value=(None, None)), \
-             patch.object(mgr, "_resolve_endpoint_ip", return_value=None):
+             patch.object(mgr, "_resolve_endpoint_ip", return_value=None), \
+             patch.object(mgr, "_wait_for_handshake", return_value=True):
             mgr._wg_up(str(conf))
 
         assert "10.0.0.2/32" in addr_calls
         assert "fd00::2/128" in addr_calls
+
+
+class TestSwitchLock:
+    @pytest.mark.skipif(sys.platform == "win32", reason="fcntl nicht auf Windows — Lock ist no-op")
+    def test_second_cycle_next_blocked_while_first_runs(self, tmp_addon):
+        """Zweiter cycle_next()-Aufruf während erstem läuft wird ignoriert (nicht gecrasht)."""
+        xbmcaddon.Addon.return_value.getSetting.return_value = "false"
+        mgr = WireGuardManager(str(tmp_addon))
+
+        switch_started = threading.Event()
+        allow_finish = threading.Event()
+        wg_up_calls = []
+
+        def slow_wg_up(conf):
+            wg_up_calls.append(conf)
+            switch_started.set()
+            allow_finish.wait(timeout=2)
+            return True, ""
+
+        with patch.object(mgr, "_check_requirements", return_value=True), \
+             patch.object(mgr, "_bring_down_if_up"), \
+             patch.object(mgr, "_wg_up", side_effect=slow_wg_up), \
+             patch.object(mgr, "_verify_tunnel", return_value=True), \
+             patch("resources.lib.wg_manager.notifier"):
+
+            t1 = threading.Thread(target=mgr.cycle_next)
+            t1.start()
+            switch_started.wait(timeout=2)
+
+            # Zweiter Aufruf während t1 noch läuft
+            mgr.cycle_next()
+
+            allow_finish.set()
+            t1.join(timeout=3)
+
+        # Nur ein _wg_up wurde aufgerufen — zweiter Aufruf wurde blockiert
+        assert len(wg_up_calls) == 1
+
+    def test_auto_reconnect_skips_when_locked(self, tmp_addon):
+        """auto_reconnect() überspringt Reconnect wenn Switch-Lock gehalten wird."""
+        xbmcaddon.Addon.return_value.getSetting.return_value = "false"
+        mgr = WireGuardManager(str(tmp_addon))
+
+        acquired, lf = mgr._acquire_switch_lock()
+        assert acquired
+
+        try:
+            with patch.object(mgr, "_wg_up") as mock_up, \
+                 patch("resources.lib.wg_manager.notifier"):
+                mgr.auto_reconnect()
+                mock_up.assert_not_called()
+        finally:
+            mgr._release_switch_lock(lf)
+
+    def test_lock_released_after_wg_up_error(self, tmp_addon):
+        """Lock wird im finally freigegeben — auch wenn _wg_up() fehlschlägt."""
+        xbmcaddon.Addon.return_value.getSetting.return_value = "false"
+        mgr = WireGuardManager(str(tmp_addon))
+
+        with patch.object(mgr, "_check_requirements", return_value=True), \
+             patch.object(mgr, "_bring_down_if_up"), \
+             patch.object(mgr, "_wg_up", return_value=(False, "fake error")), \
+             patch("resources.lib.wg_manager.notifier"):
+            mgr.cycle_next()
+
+        # Nach dem fehlgeschlagenen cycle_next muss Lock wieder frei sein
+        acquired, lf = mgr._acquire_switch_lock()
+        assert acquired, "Lock sollte nach Fehler freigegeben sein"
+        mgr._release_switch_lock(lf)
+
+
+class TestWaitForHandshake:
+    def test_returns_true_when_handshake_detected(self, manager):
+        """Gibt True zurück sobald latest-handshakes einen Timestamp > 0 zeigt."""
+        pubkey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+        def fake_run(cmd):
+            if "latest-handshakes" in cmd:
+                return 0, f"{pubkey}\t1711650000\n", ""
+            return 0, "", ""
+
+        with patch.object(manager, "_run", side_effect=fake_run), \
+             patch("resources.lib.wg_manager.socket"), \
+             patch("resources.lib.wg_manager.notifier"):
+            result = manager._wait_for_handshake("HideMe-Test", timeout=2.0)
+
+        assert result is True
+
+    def test_returns_false_on_timeout(self, manager):
+        """Gibt False zurück wenn Handshake nicht rechtzeitig stattfindet."""
+        def fake_run(cmd):
+            if "latest-handshakes" in cmd:
+                return 0, "", ""  # Kein Timestamp
+            return 0, "", ""
+
+        with patch.object(manager, "_run", side_effect=fake_run), \
+             patch("resources.lib.wg_manager.socket"), \
+             patch("resources.lib.wg_manager.time") as mock_time, \
+             patch("resources.lib.wg_manager.notifier"):
+            # Zeit läuft sofort ab
+            mock_time.time.side_effect = [0.0, 0.0, 99.0]
+            mock_time.sleep = MagicMock()
+            result = manager._wait_for_handshake("HideMe-Test", timeout=1.0)
+
+        assert result is False
+
+    def test_handshake_wait_called_before_kill_switch(self, tmp_addon):
+        """_wait_for_handshake() wird aufgerufen bevor Kill Switch aktiviert wird."""
+        xbmcaddon.Addon.return_value.getSetting.return_value = "true"  # Kill Switch an
+        mgr = WireGuardManager(str(tmp_addon))
+
+        call_order = []
+
+        with patch.object(mgr, "_run", return_value=(0, "", "")), \
+             patch("resources.lib.wg_manager.kill_switch") as mock_ks, \
+             patch.object(mgr, "_write_stripped_conf", return_value="/tmp/fake.conf"), \
+             patch("os.unlink"), \
+             patch.object(mgr, "_get_default_gateway", return_value=(None, None)), \
+             patch.object(mgr, "_resolve_endpoint_ip", return_value=None), \
+             patch.object(mgr, "_wait_for_handshake", side_effect=lambda *a, **kw: call_order.append("handshake") or True), \
+             patch("resources.lib.wg_manager.notifier"):
+            mock_ks.is_enabled.return_value = False
+            mock_ks.enable.side_effect = lambda *a: call_order.append("kill_switch")
+            mgr._wg_up(str(tmp_addon / "configs" / "Server-A.conf"))
+
+        assert call_order.index("handshake") < call_order.index("kill_switch")
+
+
+class TestProbeHandshake:
+    def test_returns_true_when_handshake_updates(self, manager):
+        """Wenn Handshake-Timestamp sich aktualisiert → True (idle Tunnel, Server erreichbar)."""
+        pubkey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        old_ts = 1000
+        new_ts = 1001
+
+        call_count = [0]
+        def fake_run(cmd):
+            if "latest-handshakes" in cmd:
+                call_count[0] += 1
+                if call_count[0] >= 2:
+                    return 0, f"{pubkey}\t{new_ts}\n", ""
+                return 0, f"{pubkey}\t{old_ts}\n", ""
+            return 0, "", ""
+
+        with patch.object(manager, "_run", side_effect=fake_run), \
+             patch("resources.lib.wg_manager.socket"), \
+             patch("resources.lib.wg_manager.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 0.0, 0.5]
+            mock_time.sleep = MagicMock()
+            result = manager._probe_handshake("Server-A", old_ts)
+
+        assert result is True
+
+    def test_returns_false_when_no_handshake_update(self, manager):
+        """Wenn kein Handshake-Update innerhalb 3s → False (Server down)."""
+        pubkey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        old_ts = 1000
+
+        def fake_run(cmd):
+            if "latest-handshakes" in cmd:
+                return 0, f"{pubkey}\t{old_ts}\n", ""
+            return 0, "", ""
+
+        with patch.object(manager, "_run", side_effect=fake_run), \
+             patch("resources.lib.wg_manager.socket"), \
+             patch("resources.lib.wg_manager.time") as mock_time, \
+             patch("resources.lib.wg_manager.notifier"):
+            mock_time.time.side_effect = [0.0, 0.0, 0.0, 99.0]
+            mock_time.sleep = MagicMock()
+            result = manager._probe_handshake("Server-A", old_ts)
+
+        assert result is False
+
+    def test_is_tunnel_up_uses_probe_for_stale_handshake(self, tmp_addon):
+        """Bei altem Handshake (> 180s): _probe_handshake wird aufgerufen."""
+        xbmcaddon.Addon.return_value.getSetting.return_value = "false"
+        mgr = WireGuardManager(str(tmp_addon))
+        stale_ts = int(time.time()) - 200
+
+        def fake_run(cmd):
+            if cmd[-1] == "interfaces":
+                return 0, "Server-A", ""
+            if "latest-handshakes" in cmd:
+                return 0, f"PUBKEY\t{stale_ts}\n", ""
+            return 0, "", ""
+
+        with patch.object(mgr, "_run", side_effect=fake_run), \
+             patch.object(mgr, "_probe_handshake", return_value=True) as mock_probe:
+            result = mgr.is_tunnel_up()
+
+        mock_probe.assert_called_once_with("Server-A", stale_ts)
+        assert result is True  # Probe sagt: Server erreichbar
+
+    def test_is_tunnel_up_no_probe_for_fresh_handshake(self, tmp_addon):
+        """Bei frischem Handshake (< 180s): kein Probe-Aufruf nötig."""
+        xbmcaddon.Addon.return_value.getSetting.return_value = "false"
+        mgr = WireGuardManager(str(tmp_addon))
+        fresh_ts = int(time.time()) - 30
+
+        def fake_run(cmd):
+            if cmd[-1] == "interfaces":
+                return 0, "Server-A", ""
+            if "latest-handshakes" in cmd:
+                return 0, f"PUBKEY\t{fresh_ts}\n", ""
+            return 0, "", ""
+
+        with patch.object(mgr, "_run", side_effect=fake_run), \
+             patch.object(mgr, "_probe_handshake") as mock_probe:
+            result = mgr.is_tunnel_up()
+
+        mock_probe.assert_not_called()
+        assert result is True
+
+
+class TestAutoReconnectNoLeak:
+    def test_kill_switch_not_disabled_during_reconnect_when_active(self, tmp_addon):
+        """Kill Switch bleibt aktiv während Reconnect zum gleichen Server."""
+        xbmcaddon.Addon.return_value.getSetting.return_value = "false"
+        mgr = WireGuardManager(str(tmp_addon))
+
+        disabled_calls = []
+
+        with patch.object(mgr, "_load_state"), \
+             patch.object(mgr, "is_tunnel_up", return_value=False), \
+             patch.object(mgr, "_verify_tunnel", return_value=True), \
+             patch.object(mgr, "_wg_up", return_value=(True, "")), \
+             patch.object(mgr, "_sync_kill_switch"), \
+             patch("resources.lib.wg_manager.kill_switch") as mock_ks, \
+             patch("resources.lib.wg_manager.notifier"):
+            mock_ks.is_enabled.return_value = True  # Kill Switch war aktiv
+            mock_ks.disable.side_effect = lambda: disabled_calls.append("disable")
+            mgr.auto_reconnect()
+
+        assert len(disabled_calls) == 0, "Kill Switch darf beim Reconnect nicht deaktiviert werden"
+
+    def test_kill_switch_disabled_when_not_active(self, tmp_addon):
+        """Kill Switch war aus → _wg_down darf ihn ausschalten (default behavior)."""
+        xbmcaddon.Addon.return_value.getSetting.return_value = "false"
+        mgr = WireGuardManager(str(tmp_addon))
+
+        with patch.object(mgr, "_load_state"), \
+             patch.object(mgr, "is_tunnel_up", return_value=False), \
+             patch.object(mgr, "_verify_tunnel", return_value=True), \
+             patch.object(mgr, "_wg_up", return_value=(True, "")), \
+             patch("resources.lib.wg_manager.kill_switch") as mock_ks, \
+             patch("resources.lib.wg_manager.notifier"):
+            mock_ks.is_enabled.return_value = False  # Kill Switch war aus
+            mgr.auto_reconnect()
+
+        mock_ks.disable.assert_called()
+
+    def test_auto_cycle_after_three_failures(self, tmp_addon):
+        """Nach 3 Fehlern: wechselt zum nächsten Server."""
+        # Zweite Config anlegen
+        (tmp_addon / "configs" / "Server-B.conf").write_text(
+            "[Interface]\nPrivateKey = BBBB\nAddress = 10.0.0.3/32\n"
+            "[Peer]\nPublicKey = CCCC\nEndpoint = vpn2.example.com:51820\nAllowedIPs = 0.0.0.0/0\n"
+        )
+        xbmcaddon.Addon.return_value.getSetting.return_value = "false"
+        mgr = WireGuardManager(str(tmp_addon))
+
+        with patch.object(mgr, "_load_state"), \
+             patch.object(mgr, "is_tunnel_up", return_value=False), \
+             patch.object(mgr, "_verify_tunnel", return_value=False), \
+             patch.object(mgr, "_wg_up", return_value=(True, "")), \
+             patch("resources.lib.wg_manager.kill_switch") as mock_ks, \
+             patch("resources.lib.wg_manager.notifier"):
+            mock_ks.is_enabled.return_value = False
+            # 3 Fehler triggern
+            for _ in range(3):
+                mgr.auto_reconnect()
+
+        # Index muss gewechselt haben
+        assert mgr._state["index"] == 1
+        assert mgr._reconnect_failures == 0
+
+    def test_swap_server_called_on_auto_cycle_with_active_kill_switch(self, tmp_addon):
+        """Bei Auto-Cycle mit aktivem Kill Switch: swap_server() für leckfreien Wechsel."""
+        (tmp_addon / "configs" / "Server-B.conf").write_text(
+            "[Interface]\nPrivateKey = BBBB\nAddress = 10.0.0.3/32\n"
+            "[Peer]\nPublicKey = CCCC\nEndpoint = vpn2.example.com:51820\nAllowedIPs = 0.0.0.0/0\n"
+        )
+        xbmcaddon.Addon.return_value.getSetting.return_value = "false"
+        mgr = WireGuardManager(str(tmp_addon))
+        mgr._reconnect_failures = 2  # Nächster Fehler = Failure Nr. 3 → Cycle
+
+        with patch.object(mgr, "_load_state"), \
+             patch.object(mgr, "is_tunnel_up", return_value=False), \
+             patch.object(mgr, "_verify_tunnel", return_value=False), \
+             patch.object(mgr, "_wg_up", return_value=(True, "")), \
+             patch("resources.lib.wg_manager.kill_switch") as mock_ks, \
+             patch("resources.lib.wg_manager.notifier"):
+            mock_ks.is_enabled.return_value = True  # Kill Switch aktiv
+            mgr.auto_reconnect()
+
+        mock_ks.swap_server.assert_called_once()
+
+
+class TestIsTunnelUp:
+    PUBKEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+    def _make_mgr(self, tmp_addon):
+        xbmcaddon.Addon.return_value.getSetting.return_value = "false"
+        return WireGuardManager(str(tmp_addon))
+
+    def test_returns_true_with_fresh_handshake(self, tmp_addon):
+        """Frischer Handshake (vor 10s) → True."""
+        mgr = self._make_mgr(tmp_addon)
+        fresh_ts = int(time.time()) - 10
+
+        def fake_run(cmd):
+            if cmd[-1] == "interfaces":
+                return 0, "Server-A", ""
+            if "latest-handshakes" in cmd:
+                return 0, f"{self.PUBKEY}\t{fresh_ts}\n", ""
+            return 0, "", ""
+
+        with patch.object(mgr, "_run", side_effect=fake_run):
+            assert mgr.is_tunnel_up() is True
+
+    def test_returns_false_with_stale_handshake_and_dead_server(self, tmp_addon):
+        """Handshake älter als 3 Minuten + Probe schlägt fehl → False (Server ausgefallen)."""
+        mgr = self._make_mgr(tmp_addon)
+        stale_ts = int(time.time()) - 200
+
+        def fake_run(cmd):
+            if cmd[-1] == "interfaces":
+                return 0, "Server-A", ""
+            if "latest-handshakes" in cmd:
+                return 0, f"{self.PUBKEY}\t{stale_ts}\n", ""
+            return 0, "", ""
+
+        with patch.object(mgr, "_run", side_effect=fake_run), \
+             patch.object(mgr, "_probe_handshake", return_value=False):
+            assert mgr.is_tunnel_up() is False
+
+    def test_returns_true_with_stale_handshake_but_server_alive(self, tmp_addon):
+        """Handshake älter als 3 Minuten, aber Probe erfolgreich → True (idle Tunnel)."""
+        mgr = self._make_mgr(tmp_addon)
+        stale_ts = int(time.time()) - 200
+
+        def fake_run(cmd):
+            if cmd[-1] == "interfaces":
+                return 0, "Server-A", ""
+            if "latest-handshakes" in cmd:
+                return 0, f"{self.PUBKEY}\t{stale_ts}\n", ""
+            return 0, "", ""
+
+        with patch.object(mgr, "_run", side_effect=fake_run), \
+             patch.object(mgr, "_probe_handshake", return_value=True):
+            assert mgr.is_tunnel_up() is True
+
+    def test_returns_false_when_no_handshake_yet(self, tmp_addon):
+        """Timestamp 0 (noch kein Handshake) → False."""
+        mgr = self._make_mgr(tmp_addon)
+
+        def fake_run(cmd):
+            if cmd[-1] == "interfaces":
+                return 0, "Server-A", ""
+            if "latest-handshakes" in cmd:
+                return 0, f"{self.PUBKEY}\t0\n", ""
+            return 0, "", ""
+
+        with patch.object(mgr, "_run", side_effect=fake_run):
+            assert mgr.is_tunnel_up() is False
+
+    def test_returns_false_when_interface_missing(self, tmp_addon):
+        """Interface existiert nicht → False."""
+        mgr = self._make_mgr(tmp_addon)
+
+        with patch.object(mgr, "_run", return_value=(0, "", "")):
+            assert mgr.is_tunnel_up() is False
+
+    def test_returns_true_optimistically_when_wg_unavailable(self, tmp_addon):
+        """wg-Befehl schlägt fehl → True (optimistisch, kein Reboot-Loop)."""
+        mgr = self._make_mgr(tmp_addon)
+
+        with patch.object(mgr, "_run", return_value=(1, "", "command not found")):
+            assert mgr.is_tunnel_up() is True
