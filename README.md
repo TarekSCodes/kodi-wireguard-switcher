@@ -1,4 +1,4 @@
-# service.wireguard.switcher
+# kodi-wireguard-switcher
 
 Kodi-Addon, das WireGuard-VPN-Server per Fernbedienungstaste wechselt und beim Kodi-Start automatisch den zuletzt verwendeten Server wiederherstellt. Enthält einen Kill Switch der alle Verbindungen außer durch den VPN-Tunnel blockiert.
 
@@ -72,8 +72,8 @@ Beim Aufruf mit Argument `learn`: Button-Lern-Dialog öffnen (siehe unten).
 - **WireGuard up**: Kein `wg-quick` (auf LibreELEC nicht verfügbar). Vollständig in Python mit `ip link`, `ip addr`, `ip route` und `wg setconf`. AllowedIPs `0.0.0.0/0` wird in zwei `/1`-Routen aufgeteilt (höhere Priorität als Default-Route, kein Konflikt).
 - **Handshake-Warten**: Vor Kill Switch-Aktivierung wird auf einen erfolgreichen WireGuard-Handshake gewartet (max. 8s). Verhindert DNS-Fehler beim Kodi-Start.
 - **Tunnel-Erkennung**: `is_tunnel_up()` prüft Interface-Existenz und Handshake-Aktualität. Bei Handshake älter als 3 Minuten (idle Tunnel ohne Traffic) wird ein UDP-Probe gesendet und auf Handshake-Update gewartet — verhindert unnötige Reconnects bei inaktiven Verbindungen.
-- **Race Condition Schutz**: `fcntl.flock` verhindert parallele `cycle_next()`-Aufrufe (mehrere Tastendruck-Threads). Auf Windows no-op.
-- **Failure-Counter**: `auto_reconnect()` zählt aufeinanderfolgende Verbindungsfehler. Nach 3 Fehlern wird automatisch zum nächsten Server gewechselt (wenn mehrere Configs vorhanden).
+- **Race Condition Schutz**: `fcntl.flock` verhindert parallele `cycle_next()`-Aufrufe wenn mehrere Tastendruck-Threads gleichzeitig laufen.
+-**Failure-Counter**: `auto_reconnect()` zählt aufeinanderfolgende Verbindungsfehler. Nach 3 Fehlern wird automatisch zum nächsten Server gewechselt (wenn mehrere Configs vorhanden).
 
 ### Kill Switch (`kill_switch.py`)
 

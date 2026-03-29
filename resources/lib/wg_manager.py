@@ -330,10 +330,9 @@ class WireGuardManager:
                 self._save_dns()
                 self._write_dns(dns)
 
-            # 8. Auf WireGuard-Handshake warten — sicherstellt dass der Tunnel
-            #    tatsächlich Traffic leitet bevor Kill Switch alle anderen Pfade sperrt
-            if self._kill_switch_enabled():
-                self._wait_for_handshake(iface)
+            # 8. Auf WireGuard-Handshake warten — stellt sicher dass der Tunnel
+            #    tatsächlich funktioniert bevor "Connected" signalisiert wird
+            self._wait_for_handshake(iface)
 
             # 9. Kill Switch aktivieren
             if self._kill_switch_enabled():
@@ -526,7 +525,7 @@ class WireGuardManager:
         except Exception:
             pass
 
-        deadline = time.time() + 3.0
+        deadline = time.time() + 6.0
         while time.time() < deadline:
             time.sleep(0.3)
             rc, out, _ = self._run([WG_BIN, "show", iface, "latest-handshakes"])
@@ -545,11 +544,24 @@ class WireGuardManager:
 
     def _wait_for_handshake(self, iface: str, timeout: float = 8.0) -> bool:
         """
-        Wartet bis WireGuard mindestens einen Handshake abgeschlossen hat.
-        Sendet zuerst ein UDP-Paket um den Handshake zu triggern, dann polt
-        'wg show <iface> latest-handshakes' bis ein Timestamp > 0 erscheint.
-        Gibt True zurück wenn Handshake erfolgt, False bei Timeout.
+        Wartet bis WireGuard einen NEUEN Handshake abgeschlossen hat.
+        Liest zuerst den Baseline-Timestamp — gibt True erst zurück wenn ein
+        NEUERER Timestamp erscheint. Verhindert False-Positive bei gestaletem
+        Handshake aus einer früheren Session (z.B. Interface existiert noch).
         """
+        # Baseline-Timestamp einlesen (0 wenn Interface frisch oder noch kein Handshake)
+        baseline_ts = 0
+        rc, out, _ = self._run([WG_BIN, "show", iface, "latest-handshakes"])
+        if rc == 0:
+            for line in out.strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    try:
+                        baseline_ts = int(parts[-1])
+                        break
+                    except ValueError:
+                        pass
+
         # UDP-Paket senden — wird via 0.0.0.0/1-Route durch WireGuard geroutet
         # und triggert die Handshake-Initiation im WireGuard-Kernel-Modul
         try:
@@ -570,7 +582,7 @@ class WireGuardManager:
                     if len(parts) >= 2:
                         try:
                             ts = int(parts[-1])
-                            if ts > 0:
+                            if ts > baseline_ts:
                                 notifier._log_msg("info", f"WireGuard Handshake abgeschlossen ({iface})")
                                 return True
                         except ValueError:

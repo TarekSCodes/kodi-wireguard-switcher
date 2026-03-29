@@ -241,12 +241,16 @@ class TestSwitchLock:
 
 class TestWaitForHandshake:
     def test_returns_true_when_handshake_detected(self, manager):
-        """Gibt True zurück sobald latest-handshakes einen Timestamp > 0 zeigt."""
+        """Gibt True zurück sobald ein NEUERER Timestamp als der Baseline erscheint."""
         pubkey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
+        call_count = [0]
         def fake_run(cmd):
             if "latest-handshakes" in cmd:
-                return 0, f"{pubkey}\t1711650000\n", ""
+                call_count[0] += 1
+                if call_count[0] == 1:  # Baseline-Abfrage: noch kein Handshake
+                    return 0, f"{pubkey}\t0\n", ""
+                return 0, f"{pubkey}\t1711650000\n", ""  # Frischer Handshake
             return 0, "", ""
 
         with patch.object(manager, "_run", side_effect=fake_run), \
@@ -255,6 +259,32 @@ class TestWaitForHandshake:
             result = manager._wait_for_handshake("HideMe-Test", timeout=2.0)
 
         assert result is True
+
+    def test_ignores_stale_baseline_timestamp(self, manager):
+        """Staler Baseline-Timestamp (Interface nicht sauber getrennt) wird ignoriert —
+        wartet auf einen NEUEREN Timestamp."""
+        pubkey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        stale_ts = 1700000000
+        new_ts   = 1711650000
+
+        call_count = [0]
+        def fake_run(cmd):
+            if "latest-handshakes" in cmd:
+                call_count[0] += 1
+                if call_count[0] == 1:          # Baseline: staler Timestamp
+                    return 0, f"{pubkey}\t{stale_ts}\n", ""
+                if call_count[0] == 2:          # Erster Poll: noch stale
+                    return 0, f"{pubkey}\t{stale_ts}\n", ""
+                return 0, f"{pubkey}\t{new_ts}\n", ""  # Zweiter Poll: frischer HS
+            return 0, "", ""
+
+        with patch.object(manager, "_run", side_effect=fake_run), \
+             patch("resources.lib.wg_manager.socket"), \
+             patch("resources.lib.wg_manager.notifier"):
+            result = manager._wait_for_handshake("HideMe-Test", timeout=5.0)
+
+        assert result is True
+        assert call_count[0] >= 3  # Baseline + mind. 2 Polls
 
     def test_returns_false_on_timeout(self, manager):
         """Gibt False zurück wenn Handshake nicht rechtzeitig stattfindet."""
@@ -273,6 +303,24 @@ class TestWaitForHandshake:
             result = manager._wait_for_handshake("HideMe-Test", timeout=1.0)
 
         assert result is False
+
+    def test_handshake_wait_always_called(self, tmp_addon):
+        """_wait_for_handshake() wird immer aufgerufen — unabhängig vom Kill Switch Setting."""
+        xbmcaddon.Addon.return_value.getSetting.return_value = "false"  # Kill Switch aus
+        mgr = WireGuardManager(str(tmp_addon))
+
+        with patch.object(mgr, "_run", return_value=(0, "", "")), \
+             patch("resources.lib.wg_manager.kill_switch"), \
+             patch.object(mgr, "_write_stripped_conf", return_value="/tmp/fake.conf"), \
+             patch("os.unlink"), \
+             patch.object(mgr, "_get_default_gateway", return_value=(None, None)), \
+             patch.object(mgr, "_resolve_endpoint_ip", return_value=None), \
+             patch.object(mgr, "_wait_for_handshake") as mock_hs, \
+             patch("resources.lib.wg_manager.notifier"):
+            mock_hs.return_value = True
+            mgr._wg_up(str(tmp_addon / "configs" / "Server-A.conf"))
+
+        mock_hs.assert_called_once()
 
     def test_handshake_wait_called_before_kill_switch(self, tmp_addon):
         """_wait_for_handshake() wird aufgerufen bevor Kill Switch aktiviert wird."""
