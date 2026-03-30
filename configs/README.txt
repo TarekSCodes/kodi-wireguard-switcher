@@ -1,12 +1,12 @@
-WireGuard Config-Dateien hier ablegen.
+Place WireGuard config files here.
 
-Wichtige Regeln fuer Dateinamen:
-- Max 15 Zeichen (Linux-Interface-Name-Limit!)
-- Keine Leerzeichen, keine Punkte
-- Nur Buchstaben, Ziffern, Bindestriche
-- Beispiel: HideMe-DE.conf, HideMe-NL.conf, HideMe-PL.conf
+Important filename rules:
+- Max 15 characters (Linux interface name limit!)
+- No spaces, no dots
+- Letters, digits, and hyphens only
+- Example: HideMe-DE.conf, HideMe-NL.conf, HideMe-PL.conf
 
-Config-Format (HideMe-Portal: Konto -> VPN Apps -> WireGuard):
+Config format (HideMe portal: Account -> VPN Apps -> WireGuard):
 
     [Interface]
     PrivateKey = <private_key_base64>
@@ -19,7 +19,7 @@ Config-Format (HideMe-Portal: Konto -> VPN Apps -> WireGuard):
     AllowedIPs = 0.0.0.0/0, ::/0
     PersistentKeepalive = 25
 
-Die DNS-Zeile ist entscheidend: wg-quick down setzt DNS sauber zurueck.
-PersistentKeepalive = 25 verhindert NAT-Timeouts.
+The DNS line is essential: wg-quick down cleanly resets DNS.
+PersistentKeepalive = 25 prevents NAT timeouts.
 
-ACHTUNG: Diese Dateien enthalten Private Keys — NIEMALS committen!
+WARNING: These files contain private keys — NEVER commit them!

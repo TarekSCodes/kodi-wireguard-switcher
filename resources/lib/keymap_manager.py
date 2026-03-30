@@ -12,13 +12,13 @@ def _keymap_path() -> str:
 
 def write_keymap(addon_path: str, button_code: int = None):
     """
-    Schreibt die Keymap nach special://userdata/keymaps/wireguard.xml.
-    Diese Location wird von Kodi dynamisch neu geladen (Action(reloadkeymaps)).
-    ZIP-install-safe: service.py ruft diese Funktion beim Start auf.
+    Writes the keymap to special://userdata/keymaps/wireguard.xml.
+    This location is dynamically reloaded by Kodi (Action(reloadkeymaps)).
+    ZIP-install-safe: service.py calls this function on startup.
 
-    button_code: Wenn gesetzt, wird ein <key id="..."> für die Fernbedienung
-    in den <keyboard>-Abschnitt eingetragen (NICHT <remote> — remote kennt
-    keine numerischen IDs, keyboard schon).
+    button_code: If set, a <key id="..."> for the remote is added to the
+    <keyboard> section (NOT <remote> — remote does not support numeric IDs,
+    keyboard does).
     """
     key_line = ""
     if button_code is not None:
@@ -40,13 +40,13 @@ def write_keymap(addon_path: str, button_code: int = None):
         f.write(xml)
 
     xbmc.executebuiltin("Action(reloadkeymaps)")
-    xbmc.log(f"[WireGuardSwitcher] Keymap geschrieben nach {keymap_path} (button_code={button_code})", xbmc.LOGINFO)
+    xbmc.log(f"[WireGuardSwitcher] Keymap written to {keymap_path} (button_code={button_code})", xbmc.LOGINFO)
 
 
 def find_key_conflict(button_code: int) -> str | None:
     """
-    Prüft ob eine andere Keymap-Datei denselben key id bereits belegt.
-    Gibt den Dateinamen zurück (nur Name, nicht Pfad) oder None.
+    Checks whether another keymap file already uses the same key id.
+    Returns the filename (name only, not path) or None.
     """
     keymap_dir = xbmcvfs.translatePath("special://userdata/keymaps/")
     try:
@@ -70,8 +70,8 @@ def find_key_conflict(button_code: int) -> str | None:
 
 def remove_key_from_file(fname: str, button_code: int):
     """
-    Entfernt alle Vorkommen von <key id="button_code"> aus einer Keymap-Datei.
-    Schreibt die bereinigte Version zurück.
+    Removes all occurrences of <key id="button_code"> from a keymap file.
+    Writes the cleaned version back.
     """
     keymap_dir = xbmcvfs.translatePath("special://userdata/keymaps/")
     path = os.path.join(keymap_dir, fname)
@@ -84,12 +84,12 @@ def remove_key_from_file(fname: str, button_code: int):
         ]
         with open(path, "w", encoding="utf-8") as f:
             f.writelines(cleaned)
-        xbmc.log(f"[WireGuardSwitcher] key id={button_code} aus {fname} entfernt", xbmc.LOGINFO)
+        xbmc.log(f"[WireGuardSwitcher] key id={button_code} removed from {fname}", xbmc.LOGINFO)
     except OSError as e:
-        xbmc.log(f"[WireGuardSwitcher] Konnte {fname} nicht bereinigen: {e}", xbmc.LOGWARNING)
+        xbmc.log(f"[WireGuardSwitcher] Could not clean {fname}: {e}", xbmc.LOGWARNING)
 
 
 def restore_from_state(addon_path: str, state: dict):
-    """Stellt die Keymap aus dem gespeicherten State wieder her (nach Deploy / Kodi-Start)."""
+    """Restores the keymap from the saved state (after deploy / Kodi startup)."""
     button_code = state.get("button_code")
     write_keymap(addon_path, button_code=int(button_code) if button_code is not None else None)
