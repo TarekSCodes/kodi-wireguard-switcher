@@ -1,94 +1,94 @@
 # kodi-wireguard-switcher
 
-Kodi-Addon, das WireGuard-VPN-Server per Fernbedienungstaste wechselt und beim Kodi-Start automatisch den zuletzt verwendeten Server wiederherstellt. Enthält einen Kill Switch der alle Verbindungen außer durch den VPN-Tunnel blockiert.
+Kodi addon that switches WireGuard VPN servers via a remote button and automatically restores the last used server on Kodi startup. Includes a Kill Switch that blocks all connections except through the VPN tunnel.
 
-> **Plattform:** Linux erforderlich. Das Addon ruft `wg` und `ip` auf — beides Linux-Kommandozeilentools. Auf Windows-Kodi startet das Addon zwar, der VPN-Wechsel schlägt jedoch fehl, da diese Binaries dort nicht verfügbar sind.
-
----
-
-## Voraussetzungen
-
-- Kodi auf **Linux** (getestet mit LibreELEC 12 / Kodi 21)
-- `wg` unter `/usr/bin/wg` und `ip` unter `/sbin/ip` verfügbar (in LibreELEC 12 nativ vorhanden)
-- `iptables` unter `/usr/sbin/iptables` (für Kill Switch, optional)
-- WireGuard-Configs vom VPN-Anbieter (getestet mit HideMe)
-- Python 3 auf dem Entwicklungsrechner
+> **Platform:** Linux required. The addon calls `wg` and `ip` — both Linux command-line tools. On Windows Kodi the addon starts, but VPN switching fails because these binaries are not available there.
 
 ---
 
-## Projektstruktur
+## Requirements
+
+- Kodi on **Linux** (tested with LibreELEC 12 / Kodi 21)
+- `wg` at `/usr/bin/wg` and `ip` at `/sbin/ip` (natively available in LibreELEC 12)
+- `iptables` at `/usr/sbin/iptables` (for Kill Switch, optional)
+- WireGuard configs from VPN provider (tested with HideMe)
+- Python 3 on the development machine
+
+---
+
+## Project Structure
 
 ```
 service.wireguard.switcher/
-├── addon.xml                   Kodi-Addon-Manifest
-├── service.py                  Hintergrundservice (startet mit Kodi)
-├── switch.py                   Script für Tastendruck (VPN-Wechsel)
+├── addon.xml                   Kodi addon manifest
+├── service.py                  Background service (starts with Kodi)
+├── switch.py                   Script for button press (VPN switch)
 ├── resources/
-│   ├── settings.xml            Addon-Einstellungen in Kodi
+│   ├── settings.xml            Addon settings in Kodi
 │   └── lib/
-│       ├── wg_manager.py       Core-Logik: WireGuard, State, Config-Cycling, Kill Switch Sync
-│       ├── kill_switch.py      iptables Kill Switch (WG_KILL_SWITCH Chain)
-│       ├── notifier.py         Kodi-Notification-Wrapper
-│       ├── button_learner.py   Dialog zum Erlernen einer Fernbedienungstaste
-│       └── keymap_manager.py   Schreibt die Keymap-XML und lädt sie neu
-├── configs/                    WireGuard .conf-Dateien (gitignored!)
-│   └── README.txt              Regeln für Dateinamen
+│       ├── wg_manager.py       Core logic: WireGuard, state, config cycling, Kill Switch sync
+│       ├── kill_switch.py      iptables Kill Switch (WG_KILL_SWITCH chain)
+│       ├── notifier.py         Kodi notification wrapper
+│       ├── button_learner.py   Dialog for learning a remote button
+│       └── keymap_manager.py   Writes the keymap XML and reloads it
+├── configs/                    WireGuard .conf files (gitignored!)
+│   └── README.txt              File naming rules
 ├── keymaps/
-│   └── wireguard.xml           Generierte Keymap (wird zur Laufzeit überschrieben)
-├── tests/                      pytest-Tests
-├── deploy.py                   SFTP-Deploy-Script (gitignored)
-├── requirements.txt            Entwicklungs-Abhängigkeiten
+│   └── wireguard.xml           Generated keymap (overwritten at runtime)
+├── tests/                      pytest tests
+├── deploy.py                   SFTP deploy script (gitignored)
+├── requirements.txt            Development dependencies
 └── .gitignore
 ```
 
 ---
 
-## Funktionsweise
+## How It Works
 
-### Beim Kodi-Start (`service.py`)
+### On Kodi Startup (`service.py`)
 
-`service.py` ist als `xbmc.service` registriert und startet automatisch nach dem Login. Es:
+`service.py` is registered as an `xbmc.service` and starts automatically after login. It:
 
-1. Stellt die zuletzt konfigurierte Fernbedienungstaste aus `state.json` wieder her (Keymap neu schreiben)
-2. Verbindet den zuletzt verwendeten WireGuard-Server (`restore()`)
-3. Läuft in einer Schleife und prüft alle 30 Sekunden ob der Tunnel noch aktiv ist — falls nicht, reconnectet er automatisch
+1. Restores the last configured remote button from `state.json` (rewrites keymap)
+2. Connects to the last used WireGuard server (`restore()`)
+3. Runs in a loop and checks every 30 seconds whether the tunnel is still active — if not, it reconnects automatically
 
-`waitForAbort(1)` statt `time.sleep()` sorgt dafür, dass der Service sofort auf ein Kodi-Shutdown-Signal reagiert. Der Tunnel bleibt nach Kodi-Exit aktiv.
+`waitForAbort(1)` instead of `time.sleep()` ensures the service responds immediately to a Kodi shutdown signal. The tunnel stays active after Kodi exits.
 
-### Beim Tastendruck (`switch.py`)
+### On Button Press (`switch.py`)
 
-`switch.py` ist als `xbmc.python.script` registriert und wird von der Keymap ausgelöst. Es läuft als eigener kurzlebiger Prozess — ein Absturz killt nicht den Monitor-Service.
+`switch.py` is registered as `xbmc.python.script` and triggered by the keymap. It runs as its own short-lived process — a crash does not kill the monitor service.
 
-Beim Aufruf ohne Argumente: Aktuellen Tunnel trennen → nächste Config in der alphabetisch sortierten Liste aktivieren → in `state.json` speichern.
+Called without arguments: disconnect the current tunnel → activate the next config in the alphabetically sorted list → save to `state.json`.
 
-Beim Aufruf mit Argument `learn`: Button-Lern-Dialog öffnen (siehe unten).
+Called with argument `learn`: open the button learning dialog (see below).
 
-### Core-Logik (`wg_manager.py`)
+### Core Logic (`wg_manager.py`)
 
-`WireGuardManager` kapselt die gesamte WireGuard-Logik:
+`WireGuardManager` encapsulates all WireGuard logic:
 
-- **Config-Liste**: `glob("configs/*.conf")` alphabetisch sortiert. Der Dateiname (ohne `.conf`) wird direkt als Linux-Interface-Name verwendet (max. 15 Zeichen).
-- **State**: `state.json` speichert Index, Servername, Button-Code und die Endpoint-IP. Atomic Write via `tempfile + os.replace()`.
-- **WireGuard up**: Kein `wg-quick` (auf LibreELEC nicht verfügbar). Vollständig in Python mit `ip link`, `ip addr`, `ip route` und `wg setconf`. AllowedIPs `0.0.0.0/0` wird in zwei `/1`-Routen aufgeteilt (höhere Priorität als Default-Route, kein Konflikt).
-- **Handshake-Warten**: Vor Kill Switch-Aktivierung wird auf einen erfolgreichen WireGuard-Handshake gewartet (max. 8s). Verhindert DNS-Fehler beim Kodi-Start.
-- **Tunnel-Erkennung**: `is_tunnel_up()` prüft Interface-Existenz und Handshake-Aktualität. Bei Handshake älter als 3 Minuten (idle Tunnel ohne Traffic) wird ein UDP-Probe gesendet und auf Handshake-Update gewartet — verhindert unnötige Reconnects bei inaktiven Verbindungen.
-- **Race Condition Schutz**: `fcntl.flock` verhindert parallele `cycle_next()`-Aufrufe wenn mehrere Tastendruck-Threads gleichzeitig laufen.
--**Failure-Counter**: `auto_reconnect()` zählt aufeinanderfolgende Verbindungsfehler. Nach 3 Fehlern wird automatisch zum nächsten Server gewechselt (wenn mehrere Configs vorhanden).
+- **Config list**: `glob("configs/*.conf")` sorted alphabetically. The filename (without `.conf`) is used directly as the Linux interface name (max. 15 characters).
+- **State**: `state.json` stores index, server name, button code, and endpoint IP. Atomic write via `tempfile + os.replace()`.
+- **WireGuard up**: No `wg-quick` (not available on LibreELEC). Fully implemented in Python with `ip link`, `ip addr`, `ip route`, and `wg setconf`. AllowedIPs `0.0.0.0/0` is split into two `/1` routes (higher priority than the default route, no conflicts).
+- **Handshake wait**: Before activating the Kill Switch, a successful WireGuard handshake is awaited (max. 8s). Prevents DNS errors on Kodi startup.
+- **Tunnel detection**: `is_tunnel_up()` checks interface existence and handshake freshness. If the handshake is older than 3 minutes (idle tunnel without traffic), a UDP probe is sent and the system waits for a handshake update — prevents unnecessary reconnects for idle connections.
+- **Race condition protection**: `fcntl.flock` prevents parallel `cycle_next()` calls when multiple button-press threads run simultaneously.
+- **Failure counter**: `auto_reconnect()` counts consecutive connection failures. After 3 failures it automatically switches to the next server (when multiple configs are available).
 
 ### Kill Switch (`kill_switch.py`)
 
-Optionaler Schutz, der alle ausgehenden Verbindungen blockiert, die nicht durch den WireGuard-Tunnel laufen.
+Optional protection that blocks all outgoing connections not going through the WireGuard tunnel.
 
-- Eigene iptables-Chain `WG_KILL_SWITCH` eingehängt in `OUTPUT` und `FORWARD` (nicht INPUT)
-- Erlaubt: loopback, WireGuard-Interface, WireGuard-Endpoint UDP:51820, ESTABLISHED/RELATED
-- **Leckfreier Reconnect**: Beim Auto-Reconnect bleibt der Kill Switch aktiv — kein 1-2s IP-Leck beim Server-Neuverbinden
-- **Atomarer Server-Tausch** (`swap_server()`): Beim Wechsel zu einem neuen Server werden Regeln so getauscht, dass kein Moment existiert, in dem beliebiger Traffic ungefiltert fließen kann
+- Dedicated iptables chain `WG_KILL_SWITCH` inserted into `OUTPUT` and `FORWARD` (not INPUT)
+- Allows: loopback, WireGuard interface, WireGuard endpoint UDP:51820, ESTABLISHED/RELATED
+- **Leak-free reconnect**: During auto-reconnect the Kill Switch stays active — no 1-2s IP leak when reconnecting to a server
+- **Atomic server swap** (`swap_server()`): When switching to a new server, rules are swapped so there is no moment where arbitrary traffic can flow unfiltered
 
 ### Notifications (`notifier.py`)
 
-Dünner Wrapper um `xbmcgui.Dialog().notification()`. Enthält einen Kodi/Non-Kodi-Guard via `try/except Import` — der Code läuft dadurch auch auf dem Entwicklungsrechner ohne Kodi.
+Thin wrapper around `xbmcgui.Dialog().notification()`. Contains a Kodi/non-Kodi guard via `try/except import` — the code also runs on the development machine without Kodi.
 
-| Funktion | Icon | Dauer |
+| Function | Icon | Duration |
 |---|---|---|
 | `connecting(server)` | INFO | 5s |
 | `connected(server)` | INFO | 4s |
@@ -98,25 +98,25 @@ Dünner Wrapper um `xbmcgui.Dialog().notification()`. Enthält einen Kodi/Non-Ko
 | `switch_in_progress()` | INFO | 3s |
 | `kill_switch_blocking()` | ERROR | 35s |
 
-### Fernbedienung einrichten (`button_learner.py` + `keymap_manager.py`)
+### Remote Button Setup (`button_learner.py` + `keymap_manager.py`)
 
-Kodi hat kein Standard-UI für Button-Mapping. Das Addon implementiert es selbst:
+Kodi has no standard UI for button mapping. The addon implements it itself:
 
-1. Kodi → Addons → WireGuard Switcher → **Konfigurieren**
-2. „Remote-Taste belegen" anklicken
-3. Ein Vollbild-Dialog erscheint: `ButtonLearnerWindow` (erbt von `xbmcgui.WindowDialog`) fängt den nächsten `onAction`-Event ab
-4. `action.getButtonCode()` liefert den gerätespezifischen numerischen Button-Code
-5. Der Code wird in `state.json` gespeichert und `keymap_manager` schreibt `keymaps/wireguard.xml` neu:
+1. Kodi → Addons → WireGuard Switcher → **Configure**
+2. Click "Map remote button"
+3. A full-screen dialog appears: `ButtonLearnerWindow` (inherits from `xbmcgui.WindowDialog`) captures the next `onAction` event
+4. `action.getButtonCode()` returns the device-specific numeric button code
+5. The code is saved to `state.json` and `keymap_manager` rewrites `keymaps/wireguard.xml`:
    ```xml
    <key id="61952">RunScript(service.wireguard.switcher)</key>
    ```
-6. `xbmc.executebuiltin("Action(reloadkeymaps)")` lädt die Keymap sofort — kein Kodi-Neustart nötig
+6. `xbmc.executebuiltin("Action(reloadkeymaps)")` reloads the keymap immediately — no Kodi restart required
 
-Nach einem erneuten Deploy stellt `service.py` beim nächsten Start die Keymap automatisch aus `state.json` wieder her.
+After a fresh deploy, `service.py` automatically restores the keymap from `state.json` on next startup.
 
 ---
 
-## State-Datei (`state.json`)
+## State File (`state.json`)
 
 ```json
 {
@@ -126,13 +126,13 @@ Nach einem erneuten Deploy stellt `service.py` beim nächsten Start die Keymap a
 }
 ```
 
-Wird automatisch verwaltet. Ist gitignored.
+Managed automatically. Gitignored.
 
 ---
 
-## WireGuard-Configs (`configs/`)
+## WireGuard Configs (`configs/`)
 
-Standard WireGuard-Config:
+Standard WireGuard config:
 
 ```ini
 [Interface]
@@ -147,45 +147,45 @@ AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 ```
 
-**Wichtige Regeln für Dateinamen:**
-- Max. 15 Zeichen (Linux-Interface-Name-Limit)
-- Keine Leerzeichen, keine Punkte im Namen
-- Nur Buchstaben, Ziffern, Bindestriche
-- Beispiele: `HideMe-DE.conf`, `HideMe-NL.conf`, `HideMe-HU.conf`
+**Important filename rules:**
+- Max. 15 characters (Linux interface name limit)
+- No spaces, no dots in the name
+- Letters, digits, and hyphens only
+- Examples: `HideMe-DE.conf`, `HideMe-NL.conf`, `HideMe-HU.conf`
 
-**Configs niemals committen** — sie enthalten den WireGuard Private Key!
+**Never commit configs** — they contain the WireGuard private key!
 
 ---
 
-## Entwicklung
+## Development
 
 ```bash
-# Virtuelle Umgebung aktivieren (Windows)
+# Activate virtual environment (Windows)
 .venv\Scripts\activate
 
-# Abhängigkeiten installieren
+# Install dependencies
 pip install -r requirements.txt
 
-# Tests ausführen
+# Run tests
 python -m pytest tests/ -v
 ```
 
-`kodistubs` stellt Typ-Stubs für alle Kodi-Module bereit (`xbmc`, `xbmcgui`, `xbmcvfs`, `xbmcaddon`), sodass IDE-Autovervollständigung und Typ-Prüfungen funktionieren. In VS Code den `.venv`-Interpreter auswählen: `Ctrl+Shift+P` → *Python: Select Interpreter*.
+`kodistubs` provides type stubs for all Kodi modules (`xbmc`, `xbmcgui`, `xbmcvfs`, `xbmcaddon`), enabling IDE autocompletion and type checking. In VS Code select the `.venv` interpreter: `Ctrl+Shift+P` → *Python: Select Interpreter*.
 
 ---
 
-## Logs auf dem Gerät prüfen
+## Checking Logs on the Device
 
 ```bash
-# WireGuard-Einträge im Kodi-Log
+# WireGuard entries in the Kodi log
 grep -i wireguard /storage/.kodi/temp/kodi.log | tail -30
 
-# Aktive WireGuard-Tunnel
+# Active WireGuard tunnels
 wg show
 
-# iptables Kill Switch Status
-iptables -L WG_KILL_SWITCH -v 2>/dev/null || echo "Kill Switch inaktiv"
+# iptables Kill Switch status
+iptables -L WG_KILL_SWITCH -v 2>/dev/null || echo "Kill Switch inactive"
 
-# Aktueller State
+# Current state
 cat /storage/.kodi/addons/service.wireguard.switcher/state.json
 ```

@@ -22,22 +22,22 @@ def learn_button(addon_path: str):
     del win
 
     if code is None:
-        notifier._log_msg("info", "Button-Lernen abgebrochen")
+        notifier._log_msg("info", "Button learning cancelled")
         return
 
-    notifier._log_msg("info", f"Button-Code gelernt: {code}")
+    notifier._log_msg("info", f"Button code learned: {code}")
 
-    # Prüfen ob eine andere Keymap-Datei denselben Key bereits belegt
+    # Check if another keymap file already uses the same key
     conflict = keymap_manager.find_key_conflict(code)
     if conflict:
         yes = xbmcgui.Dialog().yesno(
             "WireGuard Switcher",
-            f"Diese Taste wird bereits von '{conflict}' verwendet.\n"
-            "Soll der Eintrag dort entfernt werden?\n\n"
-            "(Nein = Abbrechen)"
+            f"This button is already used by '{conflict}'.\n"
+            "Remove it from that file?\n\n"
+            "(No = Cancel)"
         )
         if not yes:
-            notifier._log_msg("info", f"Button-Lernen abgebrochen wegen Konflikt mit {conflict}")
+            notifier._log_msg("info", f"Button learning cancelled due to conflict with {conflict}")
             return
         keymap_manager.remove_key_from_file(conflict, code)
 
@@ -47,36 +47,36 @@ def learn_button(addon_path: str):
 
     xbmcgui.Dialog().ok(
         "WireGuard Switcher",
-        "Taste erfolgreich gespeichert!\n\nAb sofort wechselt diese Taste den VPN-Server."
+        "Button saved successfully!\n\nThis button will now switch the VPN server."
     )
 
 
 def show_status(addon_path: str):
     from resources.lib import kill_switch as ks
     manager = WireGuardManager(addon_path)
-    manager._sync_kill_switch()  # iptables sofort mit Setting synchronisieren
+    manager._sync_kill_switch()  # sync iptables with current setting immediately
 
     server = manager.get_state().get("current_server") or "—"
     tunnel_up = manager.is_tunnel_up()
     ks_active = ks.is_enabled()
 
     if tunnel_up:
-        status = "Verbunden"
+        status = "Connected"
     elif ks_active:
-        status = "Getrennt  ⚠ Kill Switch blockiert Internet!"
+        status = "Disconnected  ⚠ Kill Switch is blocking internet!"
     else:
-        status = "Nicht verbunden"
+        status = "Not connected"
 
     try:
         with urllib.request.urlopen("https://api.ipify.org", timeout=5) as resp:
             current_ip = resp.read().decode().strip()
     except Exception:
-        current_ip = "(nicht abrufbar — Kill Switch aktiv?)" if ks_active else "(nicht abrufbar)"
+        current_ip = "(unavailable — Kill Switch active?)" if ks_active else "(unavailable)"
 
     if tunnel_up:
-        ip_label = f"VPN-Exit-IP:  {current_ip}"
+        ip_label = f"VPN exit IP:  {current_ip}"
     else:
-        ip_label = f"Eigene IP:    {current_ip}  ⚠ Kein VPN aktiv!"
+        ip_label = f"Your IP:      {current_ip}  ⚠ No VPN active!"
 
     xbmcgui.Dialog().ok(
         "WireGuard Status",
