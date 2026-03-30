@@ -8,8 +8,8 @@ _ACTION_NAV_BACK = 92
 
 class ButtonLearnerWindow(xbmcgui.WindowXMLDialog):
     """
-    Nativer Kodi-Dialog der auf den nächsten Fernbedienungsdruck wartet
-    und dessen Button-Code zurückgibt.
+    Native Kodi dialog that waits for the next remote button press
+    and returns its button code.
     """
 
     def __new__(cls):
@@ -33,5 +33,5 @@ class ButtonLearnerWindow(xbmcgui.WindowXMLDialog):
             self.close()
 
     def get_result(self):
-        """Gibt den Button-Code zurück, oder None wenn abgebrochen."""
+        """Returns the button code, or None if cancelled."""
         return None if self._cancelled else self._button_code

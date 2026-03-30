@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <settings>
     <setting type="lsep" label="WireGuard Switcher" />
-    <setting id="next_server" type="action" label="Nächsten VPN-Server aktivieren"
+    <setting id="next_server" type="action" label="Activate next VPN server"
               action="RunScript(service.wireguard.switcher,next)" />
-    <setting id="show_status" type="action" label="Verbindungsstatus anzeigen"
+    <setting id="show_status" type="action" label="Show connection status"
               action="RunScript(service.wireguard.switcher,status)" />
-    <setting id="map_button" type="action" label="Remote-Taste belegen"
+    <setting id="map_button" type="action" label="Map remote button"
               action="RunScript(service.wireguard.switcher,learn)" />
     <setting type="sep" />
-    <setting id="kill_switch" type="bool" label="Kill Switch (kein Internet ohne VPN)"
+    <setting id="kill_switch" type="bool" label="Kill Switch (no internet without VPN)"
               default="false" />
 </settings>
