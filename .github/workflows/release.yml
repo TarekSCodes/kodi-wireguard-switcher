@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from addon.xml
+        id: version
+        run: |
+          VERSION=$(grep -oP 'version="\K[^"]+' addon.xml | head -1)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Addon version: $VERSION"
+
+      - name: Check if tag already exists
+        id: tag_check
+        run: |
+          if git ls-remote --tags origin "refs/tags/v${{ steps.version.outputs.version }}" | grep -q .; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag v${{ steps.version.outputs.version }} already exists — skipping release"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build addon zip
+        if: steps.tag_check.outputs.exists == 'false'
+        run: |
+          ADDON_ID="service.wireguard.switcher"
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p build/$ADDON_ID dist
+
+          rsync -av \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='__pycache__' \
+            --exclude='.venv' \
+            --exclude='*.pyc' \
+            --exclude='tests/' \
+            --exclude='deploy.py' \
+            --exclude='sharded-marinating-coral.md' \
+            --exclude='requirements*.txt' \
+            --exclude='mailmap.txt' \
+            --exclude='build/' \
+            --exclude='dist/' \
+            --exclude='configs/*.conf' \
+            --exclude='state.json' \
+            --exclude='*.lock' \
+            . build/$ADDON_ID/
+
+          cd build
+          zip -r ../dist/${ADDON_ID}-${VERSION}.zip $ADDON_ID/
+
+      - name: Create GitHub Release
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          files: dist/*.zip
+          generate_release_notes: true

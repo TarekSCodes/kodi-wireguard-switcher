@@ -6,4 +6,5 @@ state.json
 switch.lock
 configs/*.conf
 deploy.py
+tests/integration_pi.py
 sharded-marinating-coral.md

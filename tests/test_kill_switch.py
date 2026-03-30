@@ -59,6 +59,37 @@ class TestEnable:
                 assert result is True
                 mock_run.assert_not_called()
 
+    def test_uses_custom_port_in_endpoint_rule(self):
+        """enable() mit endpoint_port=428 schreibt --dport 428 in die iptables-Regel."""
+        rules_added = []
+
+        def fake_run(args):
+            if args[0] == "-A" and "--dport" in args:
+                rules_added.append(args[args.index("--dport") + 1])
+            return 0, ""
+
+        with patch("resources.lib.kill_switch._run", side_effect=fake_run):
+            with patch("resources.lib.kill_switch.is_enabled", return_value=False):
+                ks.enable("wg0", "1.2.3.4", endpoint_port=428)
+
+        assert "428" in rules_added, f"Port 428 erwartet, got: {rules_added}"
+        assert "51820" not in rules_added, "Default-Port 51820 darf nicht verwendet werden"
+
+    def test_defaults_to_51820_when_no_port_given(self):
+        """enable() ohne endpoint_port → Fallback auf 51820."""
+        rules_added = []
+
+        def fake_run(args):
+            if args[0] == "-A" and "--dport" in args:
+                rules_added.append(args[args.index("--dport") + 1])
+            return 0, ""
+
+        with patch("resources.lib.kill_switch._run", side_effect=fake_run):
+            with patch("resources.lib.kill_switch.is_enabled", return_value=False):
+                ks.enable("wg0", "1.2.3.4")
+
+        assert "51820" in rules_added
+
     def test_returns_false_on_rule_error(self):
         def fail_on_chain(args):
             if args[0] == "-A":

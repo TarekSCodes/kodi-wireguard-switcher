@@ -56,15 +56,15 @@ def reconnecting(server_name: str):
 
 def switch_in_progress():
     _log_msg("info", "Switch in progress — request ignored")
-    _notify("Wechsel läuft, bitte warten...", xbmcgui.NOTIFICATION_INFO if _IN_KODI else "", 3000)
+    _notify("Switch in progress, please wait...", xbmcgui.NOTIFICATION_INFO if _IN_KODI else "", 3000)
 
 
 def kill_switch_blocking():
-    _log_msg("error", "Kill Switch aktiv — kein Internet, VPN getrennt")
-    # Dauer 35000ms: überbrückt den 30s-Reconnect-Zyklus, bleibt also dauerhaft sichtbar
-    # bis der Tunnel wieder steht und eine "Connected"-Meldung sie ablöst
+    _log_msg("error", "Kill Switch active — no internet, VPN disconnected")
+    # Duration 35000ms: covers the 30s reconnect cycle, stays visible
+    # until the tunnel is back up and a "Connected" notification replaces it
     _notify(
-        "Kein Internet — VPN getrennt (Kill Switch)",
+        "No internet — VPN disconnected (Kill Switch)",
         xbmcgui.NOTIFICATION_ERROR if _IN_KODI else "",
         35000,
     )

@@ -1,2 +1,4 @@
 kodistubs==21.0.0
 paramiko
+pytest
+pytest-mock
